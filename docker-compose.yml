@@ -1,0 +1,10 @@
+services:
+  backtest-engine:
+    build: .
+    ports:
+      - "${BT_PUBLISH_PORT:-8090}:8090"
+    environment:
+      BT_HTTP_PORT: "${BT_HTTP_PORT:-8090}"
+      BT_NATS_URL: "${BT_NATS_URL:-nats://host.docker.internal:4222}"
+      BT_CLICKHOUSE_DSN: "${BT_CLICKHOUSE_DSN:-clickhouse://default:clickhouse@host.docker.internal:9009/default}"
+      BT_CONTROL_PLANE_URL: "${BT_CONTROL_PLANE_URL:-http://host.docker.internal:8080}"

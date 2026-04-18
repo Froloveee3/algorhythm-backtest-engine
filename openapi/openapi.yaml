@@ -1,0 +1,34 @@
+openapi: 3.0.3
+info:
+  title: Backtest Engine HTTP (health probes)
+  version: "1.0"
+  description: >
+    Основная логика сервиса — NATS/JetStream worker (`cmd/worker`). Этот OpenAPI описывает только HTTP-пробы
+    для orchestration (`BT_HTTP_PORT`, по умолчанию 8090).
+servers:
+  - url: http://localhost:8090
+paths:
+  /healthz:
+    get:
+      summary: Liveness
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+  /readyz:
+    get:
+      summary: Readiness (NATS + ClickHouse ping)
+      responses:
+        "200":
+          description: Ready
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: ok
+        "503":
+          description: Not ready

@@ -98,7 +98,7 @@ func main() {
 	httpClient := &http.Client{Timeout: 60 * time.Second}
 
 	sub, err := js.QueueSubscribe(eventRunRequested, "backtest-engine", func(msg *nats.Msg) {
-		if err := handleRunRequested(ctx, nc, httpClient, cpURL, chConn, msg); err != nil {
+		if err := handleRunRequested(ctx, js, httpClient, cpURL, chConn, msg); err != nil {
 			slog.Error("handle bt.run.requested failed", "err", err)
 			_ = msg.Nak()
 			return
@@ -110,6 +110,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer sub.Unsubscribe()
+
+	httpPort := os.Getenv("BT_HTTP_PORT")
+	if httpPort == "" {
+		httpPort = "8090"
+	}
+	startHealthHTTPServer(httpPort, nc, chConn)
 
 	slog.Info("backtest-engine worker starting", "cp", cpURL, "nats", natsURL)
 
@@ -176,7 +182,7 @@ func openClickHouse(dsn string) (driver.Conn, error) {
 
 func handleRunRequested(
 	ctx context.Context,
-	nc *nats.Conn,
+	js nats.JetStreamContext,
 	httpClient *http.Client,
 	cpURL string,
 	chConn driver.Conn,
@@ -195,19 +201,19 @@ func handleRunRequested(
 	}
 
 	if err := patchExperimentRunStatus(ctx, httpClient, cpURL, payload.RunID, "running", nil); err != nil {
-		_ = publishRunFailed(nc, payload.RunID, envelope.TraceID, err.Error())
+		_ = publishRunFailed(js, payload.RunID, envelope.TraceID, err.Error())
 		return nil
 	}
 
 	if err := insertSummary(ctx, chConn, payload.RunID, payload.Symbol); err != nil {
-		_ = publishRunFailed(nc, payload.RunID, envelope.TraceID, err.Error())
+		_ = publishRunFailed(js, payload.RunID, envelope.TraceID, err.Error())
 		return nil
 	}
 
 	summary := json.RawMessage(`{"engine":"mvp","rows":0}`)
-	if err := publishRunCompleted(nc, payload.RunID, envelope.TraceID, summary); err != nil {
+	if err := publishRunCompleted(js, payload.RunID, envelope.TraceID, summary); err != nil {
 		slog.Error("publish completed failed", "err", err, "run_id", payload.RunID)
-		_ = publishRunFailed(nc, payload.RunID, envelope.TraceID, err.Error())
+		_ = publishRunFailed(js, payload.RunID, envelope.TraceID, err.Error())
 	}
 	return nil
 }
@@ -244,7 +250,7 @@ func insertSummary(ctx context.Context, conn driver.Conn, runID, symbol string) 
 	`, runID, symbol, engineVersion, time.Now().UTC())
 }
 
-func publishRunCompleted(nc *nats.Conn, runID, traceID string, summary json.RawMessage) error {
+func publishRunCompleted(js nats.JetStreamContext, runID, traceID string, summary json.RawMessage) error {
 	p, err := json.Marshal(runCompletedPayload{RunID: runID, Summary: summary})
 	if err != nil {
 		return err
@@ -261,10 +267,11 @@ func publishRunCompleted(nc *nats.Conn, runID, traceID string, summary json.RawM
 	if err != nil {
 		return err
 	}
-	return nc.Publish(eventRunCompleted, raw)
+	_, err = js.Publish(eventRunCompleted, raw)
+	return err
 }
 
-func publishRunFailed(nc *nats.Conn, runID, traceID, errMsg string) error {
+func publishRunFailed(js nats.JetStreamContext, runID, traceID, errMsg string) error {
 	p, err := json.Marshal(runFailedPayload{RunID: runID, Error: errMsg})
 	if err != nil {
 		return err
@@ -281,5 +288,35 @@ func publishRunFailed(nc *nats.Conn, runID, traceID, errMsg string) error {
 	if err != nil {
 		return err
 	}
-	return nc.Publish(eventRunFailed, raw)
+	_, err = js.Publish(eventRunFailed, raw)
+	return err
+}
+
+func startHealthHTTPServer(port string, nc *nats.Conn, chConn driver.Conn) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if nc == nil || !nc.IsConnected() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		if err := chConn.Ping(ctx); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	srv := &http.Server{Addr: ":" + port, Handler: mux}
+	go func() {
+		slog.Info("backtest-engine health HTTP", "port", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("health http", "err", err)
+		}
+	}()
 }

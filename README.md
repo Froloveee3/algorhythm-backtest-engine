@@ -15,6 +15,15 @@ Minimal worker for **Stage 3** orchestration: consumes `bt.run.requested` from N
 | `BT_CONTROL_PLANE_URL` | `http://localhost:8080` | Base URL of control-plane (no trailing slash required). |
 | `BT_NATS_URL` | `nats://localhost:4222` | NATS server URL. |
 | `BT_CLICKHOUSE_DSN` | `clickhouse://default:clickhouse@localhost:9009/default` | Native ClickHouse protocol DSN (host port `9009` matches `ops/full-stack` compose mapping `9009:9000`). |
+| `BT_HTTP_PORT` | `8090` | Minimal HTTP listener: `/healthz`, `/readyz` (see `openapi/openapi.yaml`). |
+
+## HTTP (probes only)
+
+Orchestration remains NATS-first. Operators use `curl http://localhost:${BT_HTTP_PORT:-8090}/readyz` — checks NATS connectivity and ClickHouse ping.
+
+## Packaging
+
+Docker: `Dockerfile`, `docker-compose.yml`, `.env.example`, `deploy/README.md`. Targets: `make build`, `make openapi-lint`.
 
 ## Run
 
