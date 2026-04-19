@@ -205,17 +205,70 @@ func handleRunRequested(
 		return nil
 	}
 
+	// backtest_run_summaries (from 001_init) stays as the cheap "one row per
+	// run" marker some dashboards still scan. New canonical tables from
+	// migration 002 now carry the real payload.
 	if err := insertSummary(ctx, chConn, payload.RunID, payload.Symbol); err != nil {
 		_ = publishRunFailed(js, payload.RunID, envelope.TraceID, err.Error())
 		return nil
 	}
 
-	summary := json.RawMessage(`{"engine":"mvp","rows":0}`)
+	// Placeholder simulator: deterministic synthetic trades/equity/metrics by
+	// run_id. Replace with DSL-interpreted run once feature parquet reader
+	// lands (stage-3 DoD item). Contract for downstream consumers is already
+	// stable because the canonical CH schema is final.
+	sim := simulateRun(payload.RunID, payload.StrategyVersionID, payload.Symbol)
+	if err := writeSimulationResult(ctx, chConn, sim); err != nil {
+		slog.Error("write simulation result failed", "err", err, "run_id", payload.RunID)
+		_ = publishRunFailed(js, payload.RunID, envelope.TraceID, err.Error())
+		return nil
+	}
+
+	summary, err := buildCompletedSummary(sim.Metrics)
+	if err != nil {
+		slog.Error("build summary failed", "err", err, "run_id", payload.RunID)
+		_ = publishRunFailed(js, payload.RunID, envelope.TraceID, err.Error())
+		return nil
+	}
+
+	// Tell control-plane the run is done and hand back the metrics summary so
+	// it lands in experiment_runs.result_json in one roundtrip.
+	if err := patchExperimentRunStatus(ctx, httpClient, cpURL, payload.RunID, "completed", summary); err != nil {
+		slog.Error("patch completed status failed", "err", err, "run_id", payload.RunID)
+		// Still publish on NATS so the orchestrator has a signal.
+	}
+
 	if err := publishRunCompleted(js, payload.RunID, envelope.TraceID, summary); err != nil {
 		slog.Error("publish completed failed", "err", err, "run_id", payload.RunID)
 		_ = publishRunFailed(js, payload.RunID, envelope.TraceID, err.Error())
 	}
 	return nil
+}
+
+// buildCompletedSummary marshals a stable, flat JSON object so control-plane
+// can store it verbatim in experiment_runs.result_json and downstream readers
+// can rely on fixed field names without joining ClickHouse.
+func buildCompletedSummary(m runMetrics) (json.RawMessage, error) {
+	out := map[string]any{
+		"engine":            engineVersion,
+		"run_id":            m.RunID,
+		"symbol":            m.Symbol,
+		"period_from":       m.PeriodFrom.Format(time.RFC3339),
+		"period_to":         m.PeriodTo.Format(time.RFC3339),
+		"trades_total":      m.TradesTotal,
+		"trades_won":        m.TradesWon,
+		"trades_lost":       m.TradesLost,
+		"pnl_abs":           m.PnLAbs,
+		"pnl_pct":           m.PnLPct,
+		"sharpe_ratio":      m.SharpeRatio,
+		"sortino_ratio":     m.SortinoRatio,
+		"max_drawdown_abs":  m.MaxDrawdownAbs,
+		"max_drawdown_pct":  m.MaxDrawdownPct,
+		"profit_factor":     m.ProfitFactor,
+		"expectancy":        m.Expectancy,
+		"strategy_version":  m.StrategyVersionID,
+	}
+	return json.Marshal(out)
 }
 
 func patchExperimentRunStatus(ctx context.Context, client *http.Client, baseURL, runID, status string, result json.RawMessage) error {
