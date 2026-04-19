@@ -6,7 +6,7 @@ Minimal worker for **Stage 3** orchestration: consumes `bt.run.requested` from N
 
 - **NATS** with JetStream and stream `ORCHESTRATION` (subjects `md.>`, `fb.>`, `bt.>`, `cp.>`) — same as control-plane worker.
 - **control-plane** HTTP API reachable at `BT_CONTROL_PLANE_URL`.
-- **ClickHouse** with schema applied from `migrations/clickhouse/001_init.sql`.
+- **ClickHouse** with schema applied from `migrations/clickhouse/001_init.sql` (MVP summary) and `002_backtest_results.up.sql` (canonical result tables: `backtest_trades`, `backtest_equity_curve`, `backtest_run_metrics` — checked in as **skeleton**, engine does not yet populate them).
 
 ## Configuration
 
@@ -40,10 +40,11 @@ go build -o backtest-engine-worker ./cmd/worker
 ./backtest-engine-worker
 ```
 
-Apply ClickHouse migration (example with `clickhouse-client` against the mapped port):
+Apply ClickHouse migrations (example with `clickhouse-client` against the mapped port):
 
 ```bash
 clickhouse-client --host localhost --port 9009 --user default --password clickhouse --queries-file migrations/clickhouse/001_init.sql
+clickhouse-client --host localhost --port 9009 --user default --password clickhouse --queries-file migrations/clickhouse/002_backtest_results.up.sql
 ```
 
 Ensure control-plane API and worker are running so experiment runs transition `created` → `queued` → `running` via outbox flush and this consumer.
