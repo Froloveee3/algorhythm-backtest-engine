@@ -15,7 +15,7 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/algorhythm/backtest-engine/internal/cpclient"
+	"github.com/algorhythm-llc/algorhythm-backtest-engine/internal/cpclient"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 )

@@ -1,4 +1,4 @@
-module github.com/algorhythm/backtest-engine
+module github.com/algorhythm-llc/algorhythm-backtest-engine
 
 go 1.25
 

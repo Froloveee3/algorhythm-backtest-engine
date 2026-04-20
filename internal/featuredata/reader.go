@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/algorhythm/backtest-engine/internal/storage"
+	"github.com/algorhythm-llc/algorhythm-backtest-engine/internal/storage"
 	"github.com/parquet-go/parquet-go"
 )
 
