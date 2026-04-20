@@ -131,6 +131,39 @@ type DatasetPartition struct {
 	CreatedAt time.Time `json:"CreatedAt"`
 }
 
+// ExperimentBatch mirrors control-plane's domain.ExperimentBatch. The engine
+// reads FeatureSetVersionID to resolve (code, version) via
+// feature_set_versions → feature_sets; SymbolUniverseJSON is kept as a raw
+// payload for diagnostics.
+type ExperimentBatch struct {
+	ID                  string          `json:"ID"`
+	Name                string          `json:"Name"`
+	FeatureSetVersionID string          `json:"FeatureSetVersionID"`
+	SymbolUniverseJSON  json.RawMessage `json:"SymbolUniverseJSON,omitempty"`
+	CreatedAt           time.Time       `json:"CreatedAt"`
+}
+
+// FeatureSet mirrors control-plane's domain.FeatureSet. Code is the stable
+// identifier the engine pairs with Version to form featuredata.FeatureSetKey.
+type FeatureSet struct {
+	ID          string    `json:"ID"`
+	Code        string    `json:"Code"`
+	Description string    `json:"Description,omitempty"`
+	CreatedAt   time.Time `json:"CreatedAt"`
+}
+
+// FeatureSetVersion mirrors control-plane's domain.FeatureSetVersion.
+// SchemaJSON is the write-time contract snapshot captured when feature-builder
+// persisted the version; the engine does NOT parse it for column discovery —
+// authoritative runtime columns are pinned in featuredata.
+type FeatureSetVersion struct {
+	ID           string          `json:"ID"`
+	FeatureSetID string          `json:"FeatureSetID"`
+	Version      int             `json:"Version"`
+	SchemaJSON   json.RawMessage `json:"SchemaJSON,omitempty"`
+	CreatedAt    time.Time       `json:"CreatedAt"`
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -205,6 +238,69 @@ func (c *Client) GetDataset(ctx context.Context, id string) (*Dataset, error) {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// GetExperimentBatch fetches `/api/v1/experiment-batches/{id}`. The engine
+// uses FeatureSetVersionID from the returned batch to resolve the feature set
+// key bound to a run.
+func (c *Client) GetExperimentBatch(ctx context.Context, id string) (*ExperimentBatch, error) {
+	if id == "" {
+		return nil, errors.New("cpclient: empty experiment_batch id")
+	}
+	var out ExperimentBatch
+	if err := c.getJSON(ctx, "/api/v1/experiment-batches/"+url.PathEscape(id), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetFeatureSet fetches `/api/v1/feature-sets/{id}`.
+func (c *Client) GetFeatureSet(ctx context.Context, id string) (*FeatureSet, error) {
+	if id == "" {
+		return nil, errors.New("cpclient: empty feature_set id")
+	}
+	var out FeatureSet
+	if err := c.getJSON(ctx, "/api/v1/feature-sets/"+url.PathEscape(id), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetFeatureSetVersion fetches `/api/v1/feature-set-versions/{id}`.
+func (c *Client) GetFeatureSetVersion(ctx context.Context, id string) (*FeatureSetVersion, error) {
+	if id == "" {
+		return nil, errors.New("cpclient: empty feature_set_version id")
+	}
+	var out FeatureSetVersion
+	if err := c.getJSON(ctx, "/api/v1/feature-set-versions/"+url.PathEscape(id), &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ListDatasets fetches `/api/v1/datasets` filtered by optional symbol and
+// dataset_type. Empty strings mean "no filter"; limit is clamped by the
+// server.
+func (c *Client) ListDatasets(ctx context.Context, symbol, datasetType string, limit int) ([]Dataset, error) {
+	q := url.Values{}
+	if symbol != "" {
+		q.Set("symbol", symbol)
+	}
+	if datasetType != "" {
+		q.Set("type", datasetType)
+	}
+	if limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", limit))
+	}
+	path := "/api/v1/datasets"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	var out []Dataset
+	if err := c.getJSON(ctx, path, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // ListDatasetPartitions fetches `/api/v1/datasets/{id}/partitions`. Engine
