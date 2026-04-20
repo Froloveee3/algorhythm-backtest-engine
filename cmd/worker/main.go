@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/algorhythm/backtest-engine/internal/cpclient"
 	"github.com/google/uuid"
 	"github.com/nats-io/nats.go"
 )
@@ -95,10 +95,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	httpClient := &http.Client{Timeout: 60 * time.Second}
+	cp := cpclient.New(cpURL, cpclient.WithHTTPClient(&http.Client{Timeout: 30 * time.Second}))
 
 	sub, err := js.QueueSubscribe(eventRunRequested, "backtest-engine", func(msg *nats.Msg) {
-		if err := handleRunRequested(ctx, js, httpClient, cpURL, chConn, msg); err != nil {
+		if err := handleRunRequested(ctx, js, cp, chConn, msg); err != nil {
 			slog.Error("handle bt.run.requested failed", "err", err)
 			_ = msg.Nak()
 			return
@@ -183,8 +183,7 @@ func openClickHouse(dsn string) (driver.Conn, error) {
 func handleRunRequested(
 	ctx context.Context,
 	js nats.JetStreamContext,
-	httpClient *http.Client,
-	cpURL string,
+	cp *cpclient.Client,
 	chConn driver.Conn,
 	msg *nats.Msg,
 ) error {
@@ -200,7 +199,10 @@ func handleRunRequested(
 		return fmt.Errorf("run_id missing in payload")
 	}
 
-	if err := patchExperimentRunStatus(ctx, httpClient, cpURL, payload.RunID, "running", nil); err != nil {
+	// Engine only ever PATCHes `running`. Terminal state (completed / failed
+	// + result) is owned by the control-plane worker, which reacts to the
+	// NATS events we publish below. See ADR-004 v2.
+	if err := cp.PatchRunRunning(ctx, payload.RunID); err != nil {
 		_ = publishRunFailed(js, payload.RunID, envelope.TraceID, err.Error())
 		return nil
 	}
@@ -229,13 +231,6 @@ func handleRunRequested(
 		slog.Error("build summary failed", "err", err, "run_id", payload.RunID)
 		_ = publishRunFailed(js, payload.RunID, envelope.TraceID, err.Error())
 		return nil
-	}
-
-	// Tell control-plane the run is done and hand back the metrics summary so
-	// it lands in experiment_runs.result_json in one roundtrip.
-	if err := patchExperimentRunStatus(ctx, httpClient, cpURL, payload.RunID, "completed", summary); err != nil {
-		slog.Error("patch completed status failed", "err", err, "run_id", payload.RunID)
-		// Still publish on NATS so the orchestrator has a signal.
 	}
 
 	if err := publishRunCompleted(js, payload.RunID, envelope.TraceID, summary); err != nil {
@@ -269,31 +264,6 @@ func buildCompletedSummary(m runMetrics) (json.RawMessage, error) {
 		"strategy_version":  m.StrategyVersionID,
 	}
 	return json.Marshal(out)
-}
-
-func patchExperimentRunStatus(ctx context.Context, client *http.Client, baseURL, runID, status string, result json.RawMessage) error {
-	body := map[string]any{"status": status}
-	if len(result) > 0 {
-		body["result"] = result
-	}
-	raw, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, baseURL+"/api/v1/experiment-runs/"+url.PathEscape(runID)+"/status", bytes.NewReader(raw))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("control-plane PATCH status %d", resp.StatusCode)
-	}
-	return nil
 }
 
 func insertSummary(ctx context.Context, conn driver.Conn, runID, symbol string) error {
