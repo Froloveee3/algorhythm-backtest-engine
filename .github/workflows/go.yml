@@ -13,5 +13,18 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.x"
+      # Needed to resolve private algorhythm-llc/* modules (strategy-dsl).
+      # Add an org-scoped PAT with `repo` read access as `ORG_GH_PAT` in
+      # repository secrets.
+      - name: Configure private Go modules
+        env:
+          GH_PAT: ${{ secrets.ORG_GH_PAT }}
+        run: |
+          if [ -z "$GH_PAT" ]; then
+            echo "::warning::ORG_GH_PAT not set — private submodule pulls will fail"
+          else
+            git config --global url."https://x-access-token:${GH_PAT}@github.com/".insteadOf "https://github.com/"
+          fi
+          echo "GOPRIVATE=github.com/algorhythm-llc/*" >> "$GITHUB_ENV"
       - run: go vet ./...
       - run: go test ./... -race -count=1
