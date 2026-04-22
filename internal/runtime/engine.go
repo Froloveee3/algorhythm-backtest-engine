@@ -62,7 +62,7 @@ func RunV1(ctx context.Context, meta RunMetadata, plan *dslcompile.CompiledPlan,
 
 		exitedThisBar := false
 		if state.Position.Open {
-			if shouldExit(plan.V1, &state.Position, bar) {
+			if shouldExitBar(plan.V1, plan.AllowShort, &state.Position, bindings, i, bar) {
 				trade, ret, err := closePosition(meta, &state, bar, plan.V1.Execution)
 				if err != nil {
 					return nil, fmt.Errorf("%w: %v", ErrExecutionFailed, err)
@@ -71,15 +71,17 @@ func RunV1(ctx context.Context, meta RunMetadata, plan *dslcompile.CompiledPlan,
 				trades = append(trades, trade)
 				returns = append(returns, ret)
 				exitedThisBar = true
+				// PR-07: close wins — do not allow a new entry on the same bar, and
+				// suppress entry on the immediately following bar (prevents
+				// "exit bar i then re-enter bar i+1" when signals stay true).
+				state.BlockedEntryUntilBar = bar.Index + 2
 			}
 		}
-		if !exitedThisBar && !state.Position.Open && evaluateV1Entry(plan.V1, bindings, i) {
-			side := execution.SideLong
-			if plan.AllowShort {
-				side = inferEntrySide(plan.V1, bindings, i)
-			}
-			if err := openPosition(meta, &state, bar, plan.V1, side, inferRegimeCode(bindings, i)); err != nil {
-				return nil, fmt.Errorf("%w: %v", ErrExecutionFailed, err)
+		if !exitedThisBar && !state.Position.Open && i >= state.BlockedEntryUntilBar {
+			if side, ok := pickV1EntrySide(plan.V1, plan.AllowShort, bindings, i); ok {
+				if err := openPosition(meta, &state, bar, plan.V1, side, inferRegimeCode(bindings, i)); err != nil {
+					return nil, fmt.Errorf("%w: %v", ErrExecutionFailed, err)
+				}
 			}
 		}
 
@@ -128,6 +130,52 @@ func inferEntrySide(plan *dslcompile.V1Plan, b *v1Bindings, idx int) execution.S
 		return execution.SideShort
 	}
 	return execution.SideLong
+}
+
+func pickV1EntrySide(plan *dslcompile.V1Plan, allowShort bool, b *v1Bindings, idx int) (execution.Side, bool) {
+	if plan == nil || b == nil {
+		return execution.SideLong, false
+	}
+	if allowShort && plan.SymmetricShortEntry {
+		if !evaluateV1Entry(plan, b, idx) {
+			return execution.SideLong, false
+		}
+		return inferEntrySide(plan, b, idx), true
+	}
+
+	longOK := evaluateV1IndicatorEntry(plan, plan.Entry, b, idx)
+	shortOK := false
+	if allowShort {
+		shortOK = evaluateV1IndicatorEntry(plan, plan.EntryShort, b, idx)
+	}
+	switch {
+	case longOK && shortOK:
+		// PR-07 deterministic tie-break: long wins; no same-bar flip/reopen.
+		return execution.SideLong, true
+	case longOK:
+		return execution.SideLong, true
+	case shortOK:
+		return execution.SideShort, true
+	default:
+		return execution.SideLong, false
+	}
+}
+
+func shouldExitBar(plan *dslcompile.V1Plan, allowShort bool, pos *PositionState, b *v1Bindings, idx int, bar BarView) bool {
+	if plan == nil || pos == nil || !pos.Open {
+		return false
+	}
+	// PR-07/PR-08: independent close_* wins over mechanical exits and over signal-hold.
+	if shouldExitCloseSide(plan, pos, b, idx) {
+		return true
+	}
+	if !plan.Execution.SignalOnly {
+		if shouldExitMechanical(plan, pos, bar) {
+			return true
+		}
+		return false
+	}
+	return shouldExitSignalHold(plan, allowShort, pos, b, idx)
 }
 
 func openPosition(meta RunMetadata, state *RuntimeState, bar BarView, plan *dslcompile.V1Plan, side execution.Side, regimeCode string) error {
@@ -200,7 +248,7 @@ func closePosition(meta RunMetadata, state *RuntimeState, bar BarView, execPlan 
 	return trade, ret, nil
 }
 
-func shouldExit(plan *dslcompile.V1Plan, pos *PositionState, bar BarView) bool {
+func shouldExitMechanical(plan *dslcompile.V1Plan, pos *PositionState, bar BarView) bool {
 	if pos == nil || !pos.Open {
 		return false
 	}
@@ -227,6 +275,42 @@ func shouldExit(plan *dslcompile.V1Plan, pos *PositionState, bar BarView) bool {
 			pos.TroughPrice = bar.TradeClose
 		}
 		return ((bar.TradeClose - pos.TroughPrice) / pos.TroughPrice * 10_000.0) >= float64(plan.Exit.TrailingStopBps)
+	default:
+		return false
+	}
+}
+
+func shouldExitCloseSide(plan *dslcompile.V1Plan, pos *PositionState, b *v1Bindings, idx int) bool {
+	if plan == nil || pos == nil || !pos.Open || b == nil {
+		return false
+	}
+	switch pos.Side {
+	case execution.SideLong:
+		return evaluateV1IndicatorEntry(plan, plan.CloseLong, b, idx)
+	case execution.SideShort:
+		return evaluateV1IndicatorEntry(plan, plan.CloseShort, b, idx)
+	default:
+		return false
+	}
+}
+
+// shouldExitSignalHold is used when execution.signal_only is true: exit when
+// the side's entry "hold" signal is no longer true (see stage-6-1-pr-08 doc).
+func shouldExitSignalHold(plan *dslcompile.V1Plan, allowShort bool, pos *PositionState, b *v1Bindings, idx int) bool {
+	if plan == nil || pos == nil || !pos.Open || b == nil {
+		return false
+	}
+	switch pos.Side {
+	case execution.SideLong:
+		return !evaluateV1IndicatorEntry(plan, plan.Entry, b, idx)
+	case execution.SideShort:
+		if plan.SymmetricShortEntry && allowShort {
+			if !evaluateV1Entry(plan, b, idx) {
+				return true
+			}
+			return inferEntrySide(plan, b, idx) != execution.SideShort
+		}
+		return !evaluateV1IndicatorEntry(plan, plan.EntryShort, b, idx)
 	default:
 		return false
 	}

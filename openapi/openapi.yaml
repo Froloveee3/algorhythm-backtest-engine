@@ -1,10 +1,10 @@
 openapi: 3.0.3
 info:
-  title: Backtest Engine HTTP (health probes)
+  title: Backtest Engine HTTP
   version: "1.0"
   description: >
-    Основная логика сервиса — NATS/JetStream worker (`cmd/worker`). Этот OpenAPI описывает только HTTP-пробы
-    для orchestration (`BT_HTTP_PORT`, по умолчанию 8090).
+    Основная логика сервиса — NATS/JetStream worker (`cmd/worker`). HTTP слой используется для health-проб
+    и runtime preflight стратегии (`BT_HTTP_PORT`, по умолчанию 8090).
 servers:
   - url: http://localhost:8090
 paths:
@@ -32,3 +32,26 @@ paths:
                 example: ok
         "503":
           description: Not ready
+  /api/v1/preflight/strategy-runtime:
+    post:
+      summary: Runtime preflight for canonical strategy DSL
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [dsl_json, feature_set_code, feature_set_version]
+              properties:
+                dsl_json:
+                  type: object
+                  additionalProperties: true
+                feature_set_code:
+                  type: string
+                feature_set_version:
+                  type: integer
+      responses:
+        "200":
+          description: Runtime compatibility preview
+        "422":
+          description: DSL could not be compiled

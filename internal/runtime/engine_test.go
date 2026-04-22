@@ -139,6 +139,216 @@ func TestRunV1_IsDeterministic(t *testing.T) {
 	}
 }
 
+const closeLongDSL = `{
+  "schema_version": "1.1.0",
+  "strategy_code": "close_long_test",
+  "instrument_scope": { "exchange": "binance", "symbols": ["BTCUSDT"] },
+  "entry":   { "type": "indicator_condition", "params": { "left": "ema_20_gt_ema_50", "right": "" } },
+  "close_long": { "type": "indicator_condition", "params": { "left": "rsi_14_lt_30000", "right": "" } },
+  "exit":    { "type": "tp_sl", "params": { "take_profit_bps": 100000, "stop_loss_bps": 100000 } },
+  "filters": [],
+  "risk":    { "type": "fixed_fraction", "params": { "risk_bps": 100 } },
+  "execution": { "fee_bps": 0, "slippage_bps": 0, "allow_short": false }
+}`
+
+func TestRunV1_CloseLongExitsBeforeMechanicalTP(t *testing.T) {
+	plan := mustCompileV1(t, closeLongDSL)
+	frame := &featuredata.FeatureFrame{
+		FeatureSet: featuredata.FeatureSetKey{Code: "btcusdt_futures_mvp", Version: 1},
+		Symbol:     "BTCUSDT",
+		PriceScale: 0,
+		RowCount:   5,
+		Timestamps: []int64{
+			tsAt(0).UnixMilli(),
+			tsAt(1).UnixMilli(),
+			tsAt(2).UnixMilli(),
+			tsAt(3).UnixMilli(),
+			tsAt(4).UnixMilli(),
+		},
+		Int64s: map[featuredata.ColumnName]*featuredata.Int64Column{
+			featuredata.ColCloseTradeI64: {Name: featuredata.ColCloseTradeI64, Values: []int64{100, 101, 102, 104, 103}},
+		},
+		Floats: map[featuredata.ColumnName]*featuredata.Float64Column{
+			featuredata.ColEMA20: {Name: featuredata.ColEMA20, Values: []float64{99, 102, 103, 104, 101}, Valid: []uint64{0b11111}},
+			featuredata.ColEMA50: {Name: featuredata.ColEMA50, Values: []float64{100, 100, 100, 100, 100}, Valid: []uint64{0b11111}},
+			// Entry at bar1; close signal at bar3 when RSI dips below 30000.
+			featuredata.ColRSI14: {Name: featuredata.ColRSI14, Values: []float64{32000, 29000, 31000, 29000, 33000}, Valid: []uint64{0b11111}},
+		},
+		Bools: map[featuredata.ColumnName]*featuredata.BoolColumn{},
+	}
+	res, err := RunV1(context.Background(), RunMetadata{
+		RunID:             "run-close-long",
+		StrategyVersionID: "sv-close-long",
+		Symbol:            "BTCUSDT",
+	}, plan, frame)
+	if err != nil {
+		t.Fatalf("RunV1: %v", err)
+	}
+	if len(res.Trades) != 1 {
+		t.Fatalf("trades=%d, want 1: %+v", len(res.Trades), res.Trades)
+	}
+	tr := res.Trades[0]
+	if tr.Side != "LONG" {
+		t.Fatalf("side=%q, want LONG", tr.Side)
+	}
+	if !tr.EntryTime.Equal(tsAt(1)) || !tr.ExitTime.Equal(tsAt(3)) {
+		t.Fatalf("unexpected trade times: %+v", tr)
+	}
+}
+
+const signalOnlyLongDSL = `{
+  "schema_version": "1.1.0",
+  "strategy_code": "signal_only_long",
+  "instrument_scope": { "exchange": "binance", "symbols": ["BTCUSDT"] },
+  "entry":   { "type": "indicator_condition", "params": { "left": "ema_20_gt_ema_50", "right": "" } },
+  "exit":    { "type": "tp_sl", "params": { "take_profit_bps": 400, "stop_loss_bps": 150 } },
+  "filters": [],
+  "risk":    { "type": "fixed_fraction", "params": { "risk_bps": 100 } },
+  "execution": { "fee_bps": 0, "slippage_bps": 0, "allow_short": false, "signal_only": true }
+}`
+
+func TestRunV1_SignalOnlyHoldsThroughMechanicalTP(t *testing.T) {
+	plan := mustCompileV1(t, signalOnlyLongDSL)
+	frame := &featuredata.FeatureFrame{
+		FeatureSet: featuredata.FeatureSetKey{Code: "btcusdt_futures_mvp", Version: 1},
+		Symbol:     "BTCUSDT",
+		PriceScale: 0,
+		RowCount:   5,
+		Timestamps: []int64{
+			tsAt(0).UnixMilli(),
+			tsAt(1).UnixMilli(),
+			tsAt(2).UnixMilli(),
+			tsAt(3).UnixMilli(),
+			tsAt(4).UnixMilli(),
+		},
+		Int64s: map[featuredata.ColumnName]*featuredata.Int64Column{
+			featuredata.ColCloseTradeI64: {Name: featuredata.ColCloseTradeI64, Values: []int64{100, 101, 102, 130, 103}},
+		},
+		Floats: map[featuredata.ColumnName]*featuredata.Float64Column{
+			featuredata.ColEMA20: {Name: featuredata.ColEMA20, Values: []float64{99, 102, 103, 104, 99}, Valid: []uint64{0b11111}},
+			featuredata.ColEMA50: {Name: featuredata.ColEMA50, Values: []float64{100, 100, 100, 100, 100}, Valid: []uint64{0b11111}},
+		},
+		Bools: map[featuredata.ColumnName]*featuredata.BoolColumn{},
+	}
+	res, err := RunV1(context.Background(), RunMetadata{
+		RunID:             "run-signal-only",
+		StrategyVersionID: "sv-signal-only",
+		Symbol:            "BTCUSDT",
+	}, plan, frame)
+	if err != nil {
+		t.Fatalf("RunV1: %v", err)
+	}
+	if len(res.Trades) != 1 {
+		t.Fatalf("trades=%d, want 1: %+v", len(res.Trades), res.Trades)
+	}
+	tr := res.Trades[0]
+	if !tr.EntryTime.Equal(tsAt(1)) || !tr.ExitTime.Equal(tsAt(4)) {
+		t.Fatalf("want entry bar1 exit bar4 when TP would hit bar3; got %+v", tr)
+	}
+}
+
+func TestRunV1_SignalOnlyCloseLongStillExitsEarly(t *testing.T) {
+	dsl := `{
+  "schema_version": "1.1.0",
+  "strategy_code": "signal_only_close_long",
+  "instrument_scope": { "exchange": "binance", "symbols": ["BTCUSDT"] },
+  "entry":   { "type": "indicator_condition", "params": { "left": "ema_20_gt_ema_50", "right": "" } },
+  "close_long": { "type": "indicator_condition", "params": { "left": "rsi_14_lt_30000", "right": "" } },
+  "exit":    { "type": "tp_sl", "params": { "take_profit_bps": 100000, "stop_loss_bps": 100000 } },
+  "filters": [],
+  "risk":    { "type": "fixed_fraction", "params": { "risk_bps": 100 } },
+  "execution": { "fee_bps": 0, "slippage_bps": 0, "allow_short": false, "signal_only": true }
+}`
+	plan := mustCompileV1(t, dsl)
+	frame := &featuredata.FeatureFrame{
+		FeatureSet: featuredata.FeatureSetKey{Code: "btcusdt_futures_mvp", Version: 1},
+		Symbol:     "BTCUSDT",
+		PriceScale: 0,
+		RowCount:   5,
+		Timestamps: []int64{
+			tsAt(0).UnixMilli(),
+			tsAt(1).UnixMilli(),
+			tsAt(2).UnixMilli(),
+			tsAt(3).UnixMilli(),
+			tsAt(4).UnixMilli(),
+		},
+		Int64s: map[featuredata.ColumnName]*featuredata.Int64Column{
+			featuredata.ColCloseTradeI64: {Name: featuredata.ColCloseTradeI64, Values: []int64{100, 101, 102, 104, 103}},
+		},
+		Floats: map[featuredata.ColumnName]*featuredata.Float64Column{
+			featuredata.ColEMA20: {Name: featuredata.ColEMA20, Values: []float64{99, 102, 103, 104, 101}, Valid: []uint64{0b11111}},
+			featuredata.ColEMA50: {Name: featuredata.ColEMA50, Values: []float64{100, 100, 100, 100, 100}, Valid: []uint64{0b11111}},
+			featuredata.ColRSI14: {Name: featuredata.ColRSI14, Values: []float64{32000, 29000, 31000, 29000, 33000}, Valid: []uint64{0b11111}},
+		},
+		Bools: map[featuredata.ColumnName]*featuredata.BoolColumn{},
+	}
+	res, err := RunV1(context.Background(), RunMetadata{
+		RunID:             "run-signal-only-close",
+		StrategyVersionID: "sv-soc",
+		Symbol:            "BTCUSDT",
+	}, plan, frame)
+	if err != nil {
+		t.Fatalf("RunV1: %v", err)
+	}
+	if len(res.Trades) != 1 {
+		t.Fatalf("trades=%d, want 1", len(res.Trades))
+	}
+	tr := res.Trades[0]
+	if !tr.EntryTime.Equal(tsAt(1)) || !tr.ExitTime.Equal(tsAt(3)) {
+		t.Fatalf("close_long should win at bar3; got %+v", tr)
+	}
+}
+
+const dualEntryDSL = `{
+  "schema_version": "1.1.0",
+  "strategy_code": "dual_entry_tiebreak",
+  "instrument_scope": { "exchange": "binance", "symbols": ["BTCUSDT"] },
+  "entry":   { "type": "indicator_condition", "params": { "left": "rsi_14_lt_30000", "right": "" } },
+  "entry_short": { "type": "indicator_condition", "params": { "left": "rsi_14_lt_30000", "right": "" } },
+  "exit":    { "type": "tp_sl", "params": { "take_profit_bps": 100000, "stop_loss_bps": 100000 } },
+  "filters": [],
+  "risk":    { "type": "fixed_fraction", "params": { "risk_bps": 100 } },
+  "execution": { "fee_bps": 0, "slippage_bps": 0, "allow_short": true }
+}`
+
+func TestRunV1_DualEntryTieBreakPrefersLong(t *testing.T) {
+	plan := mustCompileV1(t, dualEntryDSL)
+	frame := &featuredata.FeatureFrame{
+		FeatureSet: featuredata.FeatureSetKey{Code: "btcusdt_futures_mvp", Version: 1},
+		Symbol:     "BTCUSDT",
+		PriceScale: 0,
+		RowCount:   3,
+		Timestamps: []int64{
+			tsAt(0).UnixMilli(),
+			tsAt(1).UnixMilli(),
+			tsAt(2).UnixMilli(),
+		},
+		Int64s: map[featuredata.ColumnName]*featuredata.Int64Column{
+			featuredata.ColCloseTradeI64: {Name: featuredata.ColCloseTradeI64, Values: []int64{100, 101, 102}},
+		},
+		Floats: map[featuredata.ColumnName]*featuredata.Float64Column{
+			featuredata.ColEMA20: {Name: featuredata.ColEMA20, Values: []float64{100, 100, 100}, Valid: []uint64{0b111}},
+			featuredata.ColEMA50: {Name: featuredata.ColEMA50, Values: []float64{100, 100, 100}, Valid: []uint64{0b111}},
+			featuredata.ColRSI14: {Name: featuredata.ColRSI14, Values: []float64{32000, 29000, 31000}, Valid: []uint64{0b111}},
+		},
+		Bools: map[featuredata.ColumnName]*featuredata.BoolColumn{},
+	}
+	res, err := RunV1(context.Background(), RunMetadata{
+		RunID:             "run-dual-entry",
+		StrategyVersionID: "sv-dual-entry",
+		Symbol:            "BTCUSDT",
+	}, plan, frame)
+	if err != nil {
+		t.Fatalf("RunV1: %v", err)
+	}
+	if len(res.Trades) != 1 {
+		t.Fatalf("trades=%d, want 1", len(res.Trades))
+	}
+	if got := res.Trades[0].Side; got != "LONG" {
+		t.Fatalf("side=%q, want LONG", got)
+	}
+}
+
 func mustCompileV1(t *testing.T, raw string) *dslcompile.CompiledPlan {
 	t.Helper()
 	p, err := dslcompile.Compile([]byte(raw))

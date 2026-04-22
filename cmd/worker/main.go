@@ -416,23 +416,23 @@ func compileStrategy(ctx context.Context, cp *cpclient.Client, strategyVersionID
 // can rely on fixed field names without joining ClickHouse.
 func buildCompletedSummary(m runMetrics) (json.RawMessage, error) {
 	out := map[string]any{
-		"engine":            engineVersion,
-		"run_id":            m.RunID,
-		"symbol":            m.Symbol,
-		"period_from":       m.PeriodFrom.Format(time.RFC3339),
-		"period_to":         m.PeriodTo.Format(time.RFC3339),
-		"trades_total":      m.TradesTotal,
-		"trades_won":        m.TradesWon,
-		"trades_lost":       m.TradesLost,
-		"pnl_abs":           m.PnLAbs,
-		"pnl_pct":           m.PnLPct,
-		"sharpe_ratio":      m.SharpeRatio,
-		"sortino_ratio":     m.SortinoRatio,
-		"max_drawdown_abs":  m.MaxDrawdownAbs,
-		"max_drawdown_pct":  m.MaxDrawdownPct,
-		"profit_factor":     m.ProfitFactor,
-		"expectancy":        m.Expectancy,
-		"strategy_version":  m.StrategyVersionID,
+		"engine":           engineVersion,
+		"run_id":           m.RunID,
+		"symbol":           m.Symbol,
+		"period_from":      m.PeriodFrom.Format(time.RFC3339),
+		"period_to":        m.PeriodTo.Format(time.RFC3339),
+		"trades_total":     m.TradesTotal,
+		"trades_won":       m.TradesWon,
+		"trades_lost":      m.TradesLost,
+		"pnl_abs":          m.PnLAbs,
+		"pnl_pct":          m.PnLPct,
+		"sharpe_ratio":     m.SharpeRatio,
+		"sortino_ratio":    m.SortinoRatio,
+		"max_drawdown_abs": m.MaxDrawdownAbs,
+		"max_drawdown_pct": m.MaxDrawdownPct,
+		"profit_factor":    m.ProfitFactor,
+		"expectancy":       m.Expectancy,
+		"strategy_version": m.StrategyVersionID,
 	}
 	return json.Marshal(out)
 }
@@ -488,6 +488,7 @@ func publishRunFailed(js nats.JetStreamContext, runID, traceID, errMsg string) e
 
 func startHealthHTTPServer(port string, nc *nats.Conn, chConn driver.Conn) {
 	mux := http.NewServeMux()
+	registerPreflightRoutes(mux)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))

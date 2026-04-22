@@ -33,6 +33,14 @@ type RuntimeState struct {
 
 	Position PositionState
 
+	// BlockedEntryUntilBar implements PR-07 ordering: after any exit fill, do not
+	// allow a new entry until the next bar (no same-bar reopen, and also no
+	// immediate reopen on the bar immediately following an exit).
+	//
+	// Invariant: while CurrentBarIndex < BlockedEntryUntilBar, entry evaluation
+	// must be suppressed for flat state.
+	BlockedEntryUntilBar int
+
 	RealizedPnL float64
 	FeesPaid    float64
 	Equity      float64
@@ -48,9 +56,10 @@ type RuntimeState struct {
 
 func NewState() RuntimeState {
 	return RuntimeState{
-		CurrentBarIndex: -1,
-		Equity:          StartingEquity,
-		PeakEquity:      StartingEquity,
+		CurrentBarIndex:      -1,
+		BlockedEntryUntilBar: -1,
+		Equity:               StartingEquity,
+		PeakEquity:           StartingEquity,
 	}
 }
 

@@ -138,6 +138,65 @@ func TestCompile_V1_ProducesTypedPlanAndColumns(t *testing.T) {
 	if len(plan.V1.Entry.IndicatorConditions) != 2 {
 		t.Fatalf("expected 2 indicator predicates, got %+v", plan.V1.Entry.IndicatorConditions)
 	}
+	if !plan.V1.SymmetricShortEntry {
+		t.Fatal("expected SymmetricShortEntry=true when entry_short is omitted but allow_short=true")
+	}
+	if len(plan.V1.EntryShort.IndicatorConditions) != len(plan.V1.Entry.IndicatorConditions) {
+		t.Fatalf("expected EntryShort to mirror Entry for legacy symmetric v1, got long=%d short=%d",
+			len(plan.V1.Entry.IndicatorConditions), len(plan.V1.EntryShort.IndicatorConditions))
+	}
+}
+
+func TestCompile_V1_EntryShortAndCloseSides_Compiles(t *testing.T) {
+	raw := []byte(`{
+  "schema_version": "1.1.0",
+  "strategy_code": "dual_side_close_compile",
+  "instrument_scope": { "exchange": "binance", "symbols": ["BTCUSDT"] },
+  "entry": { "type": "indicator_condition", "params": { "left": "ema_20_gt_ema_50", "right": "" } },
+  "entry_short": { "type": "indicator_condition", "params": { "left": "rsi_14_lt_30000", "right": "" } },
+  "close_long": { "type": "indicator_condition", "params": { "left": "rsi_14_lt_30000", "right": "" } },
+  "close_short": { "type": "indicator_condition", "params": { "left": "ema_20_gt_ema_50", "right": "" } },
+  "exit": { "type": "tp_sl", "params": { "take_profit_bps": 400, "stop_loss_bps": 150 } },
+  "filters": [],
+  "risk": { "type": "fixed_fraction", "params": { "risk_bps": 100 } },
+  "execution": { "fee_bps": 10, "slippage_bps": 5, "allow_short": true }
+}`)
+	plan, err := Compile(raw)
+	if err != nil {
+		t.Fatalf("Compile(v1): %v", err)
+	}
+	if plan.V1.SymmetricShortEntry {
+		t.Fatal("expected SymmetricShortEntry=false when entry_short is present")
+	}
+	wantCols := []featuredata.ColumnName{
+		featuredata.ColEMA20,
+		featuredata.ColEMA50,
+		featuredata.ColRSI14,
+		featuredata.ColCloseTradeI64,
+	}
+	if !equalColumns(plan.RequiredColumns, wantCols) {
+		t.Fatalf("RequiredColumns=%v, want %v", plan.RequiredColumns, wantCols)
+	}
+}
+
+func TestCompile_V1_SignalOnlyExecutionFlag(t *testing.T) {
+	raw := []byte(`{
+  "schema_version": "1.1.0",
+  "strategy_code": "signal_only_flag",
+  "instrument_scope": { "exchange": "binance", "symbols": ["BTCUSDT"] },
+  "entry": { "type": "indicator_condition", "params": { "left": "ema_20_gt_ema_50", "right": "" } },
+  "exit": { "type": "tp_sl", "params": { "take_profit_bps": 400, "stop_loss_bps": 150 } },
+  "filters": [],
+  "risk": { "type": "fixed_fraction", "params": { "risk_bps": 100 } },
+  "execution": { "fee_bps": 0, "slippage_bps": 0, "allow_short": false, "signal_only": true }
+}`)
+	plan, err := Compile(raw)
+	if err != nil {
+		t.Fatalf("Compile(v1): %v", err)
+	}
+	if plan.V1 == nil || !plan.V1.Execution.SignalOnly {
+		t.Fatalf("expected Execution.SignalOnly=true, got %+v", plan.V1)
+	}
 }
 
 func TestCompile_V2_HappyPath_ExtractsDedupedOrderedColumns(t *testing.T) {

@@ -45,6 +45,21 @@ func bindV1Frame(frame *featuredata.FeatureFrame, plan *dslcompile.V1Plan) (*v1B
 			return nil, err
 		}
 	}
+	for _, p := range plan.EntryShort.IndicatorConditions {
+		if err := b.ensurePredicate(p, frame); err != nil {
+			return nil, err
+		}
+	}
+	for _, p := range plan.CloseLong.IndicatorConditions {
+		if err := b.ensurePredicate(p, frame); err != nil {
+			return nil, err
+		}
+	}
+	for _, p := range plan.CloseShort.IndicatorConditions {
+		if err := b.ensurePredicate(p, frame); err != nil {
+			return nil, err
+		}
+	}
 	for _, f := range plan.Filters {
 		for _, name := range f.Allowed {
 			col, ok := resolveV1FilterColumn(name)
@@ -130,18 +145,22 @@ func barViewAt(frame *featuredata.FeatureFrame, b *v1Bindings, idx int) BarView 
 }
 
 func evaluateV1Entry(plan *dslcompile.V1Plan, b *v1Bindings, idx int) bool {
+	return evaluateV1IndicatorEntry(plan, plan.Entry, b, idx)
+}
+
+func evaluateV1IndicatorEntry(plan *dslcompile.V1Plan, entry dslcompile.V1EntryPlan, b *v1Bindings, idx int) bool {
 	if plan == nil {
 		return false
 	}
 	if !evaluateV1Filters(plan, b, idx) {
 		return false
 	}
-	switch plan.Entry.Type {
+	switch entry.Type {
 	case "indicator_condition":
-		if len(plan.Entry.IndicatorConditions) == 0 {
+		if len(entry.IndicatorConditions) == 0 {
 			return false
 		}
-		for _, p := range plan.Entry.IndicatorConditions {
+		for _, p := range entry.IndicatorConditions {
 			ok, valid := evaluatePredicate(p, b, idx)
 			if !valid || !ok {
 				return false

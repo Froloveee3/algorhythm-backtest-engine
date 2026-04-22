@@ -13,11 +13,19 @@ import (
 // executor input for M7; V1Raw stays on CompiledPlan only for diagnostics /
 // parity with older tests, not for hot-path interpretation.
 type V1Plan struct {
-	Entry     V1EntryPlan
-	Exit      V1ExitPlan
-	Filters   []V1FilterPlan
-	Risk      V1RiskPlan
-	Execution V1ExecutionPlan
+	Entry      V1EntryPlan
+	EntryShort V1EntryPlan
+	// SymmetricShortEntry is true when the DSL did not specify entry_short but
+	// execution.allow_short=true. In that legacy shape the engine must keep the
+	// historical "infer side from first predicate" behaviour instead of
+	// treating entry/entry_short as independent gates.
+	SymmetricShortEntry bool
+	CloseLong           V1EntryPlan
+	CloseShort          V1EntryPlan
+	Exit                V1ExitPlan
+	Filters             []V1FilterPlan
+	Risk                V1RiskPlan
+	Execution           V1ExecutionPlan
 }
 
 type V1EntryPlan struct {
@@ -46,9 +54,10 @@ type V1RiskPlan struct {
 }
 
 type V1ExecutionPlan struct {
-	FeeBps       int
-	SlippageBps  int
-	AllowShort   bool
+	FeeBps        int
+	SlippageBps   int
+	AllowShort    bool
+	SignalOnly    bool
 	FillModelKind string
 }
 
@@ -89,6 +98,9 @@ type v1Doc struct {
 	StrategyCode    string         `json:"strategy_code"`
 	InstrumentScope v1Instrument   `json:"instrument_scope"`
 	Entry           v1TypedBlock   `json:"entry"`
+	EntryShort      *v1TypedBlock  `json:"entry_short,omitempty"`
+	CloseLong       *v1TypedBlock  `json:"close_long,omitempty"`
+	CloseShort      *v1TypedBlock  `json:"close_short,omitempty"`
 	Exit            v1TypedBlock   `json:"exit"`
 	Filters         []v1TypedBlock `json:"filters"`
 	Risk            v1TypedBlock   `json:"risk"`
@@ -96,6 +108,7 @@ type v1Doc struct {
 		FeeBps      int  `json:"fee_bps"`
 		SlippageBps int  `json:"slippage_bps"`
 		AllowShort  bool `json:"allow_short"`
+		SignalOnly  bool `json:"signal_only,omitempty"`
 	} `json:"execution"`
 }
 
@@ -143,6 +156,7 @@ func parseV1Plan(doc v1Doc) (*V1Plan, []featuredata.ColumnName, error) {
 			FeeBps:        doc.Execution.FeeBps,
 			SlippageBps:   doc.Execution.SlippageBps,
 			AllowShort:    doc.Execution.AllowShort,
+			SignalOnly:    doc.Execution.SignalOnly,
 			FillModelKind: "same_bar_close",
 		},
 	}
@@ -151,6 +165,34 @@ func parseV1Plan(doc v1Doc) (*V1Plan, []featuredata.ColumnName, error) {
 		return nil, nil, err
 	}
 	plan.Entry = entry
+
+	if doc.EntryShort != nil {
+		es, err := parseV1Entry(*doc.EntryShort, addCol)
+		if err != nil {
+			return nil, nil, err
+		}
+		plan.EntryShort = es
+	} else if doc.Execution.AllowShort {
+		// Back-compat: older v1 documents model a single symmetric `entry` and
+		// infer long vs short at runtime from the first predicate.
+		plan.EntryShort = entry
+		plan.SymmetricShortEntry = true
+	}
+
+	if doc.CloseLong != nil {
+		cl, err := parseV1Entry(*doc.CloseLong, addCol)
+		if err != nil {
+			return nil, nil, err
+		}
+		plan.CloseLong = cl
+	}
+	if doc.CloseShort != nil {
+		cs, err := parseV1Entry(*doc.CloseShort, addCol)
+		if err != nil {
+			return nil, nil, err
+		}
+		plan.CloseShort = cs
+	}
 
 	exit, err := parseV1Exit(doc.Exit)
 	if err != nil {
