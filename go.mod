@@ -4,7 +4,7 @@ go 1.25
 
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.30.0
-	github.com/algorhythm-llc/strategy-dsl v0.1.1
+	github.com/algorhythm-llc/strategy-dsl v0.1.2
 	github.com/google/uuid v1.6.0
 	github.com/minio/minio-go/v7 v7.0.100
 	github.com/nats-io/nats.go v1.49.0
