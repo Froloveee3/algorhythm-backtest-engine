@@ -59,7 +59,19 @@ type V1ExecutionPlan struct {
 	AllowShort    bool
 	SignalOnly    bool
 	FillModelKind string
+	// ReentryMode controls PR-09 re-entry / reversal behaviour.
+	// Empty string is treated as ReentryModeSingle by the runtime.
+	ReentryMode V1ReentryMode
 }
+
+// V1ReentryMode is the PR-09 execution.reentry_mode enum.
+type V1ReentryMode string
+
+const (
+	V1ReentrySingle     V1ReentryMode = "single"
+	V1ReentryContinuous V1ReentryMode = "continuous"
+	V1ReentryFlip       V1ReentryMode = "flip"
+)
 
 type V1PredicateOp string
 
@@ -105,10 +117,11 @@ type v1Doc struct {
 	Filters         []v1TypedBlock `json:"filters"`
 	Risk            v1TypedBlock   `json:"risk"`
 	Execution       struct {
-		FeeBps      int  `json:"fee_bps"`
-		SlippageBps int  `json:"slippage_bps"`
-		AllowShort  bool `json:"allow_short"`
-		SignalOnly  bool `json:"signal_only,omitempty"`
+		FeeBps      int    `json:"fee_bps"`
+		SlippageBps int    `json:"slippage_bps"`
+		AllowShort  bool   `json:"allow_short"`
+		SignalOnly  bool   `json:"signal_only,omitempty"`
+		ReentryMode string `json:"reentry_mode,omitempty"`
 	} `json:"execution"`
 }
 
@@ -151,6 +164,10 @@ func parseV1Plan(doc v1Doc) (*V1Plan, []featuredata.ColumnName, error) {
 		cols = append(cols, c)
 	}
 
+	reentry, err := parseV1ReentryMode(doc.Execution.ReentryMode)
+	if err != nil {
+		return nil, nil, err
+	}
 	plan := &V1Plan{
 		Execution: V1ExecutionPlan{
 			FeeBps:        doc.Execution.FeeBps,
@@ -158,6 +175,7 @@ func parseV1Plan(doc v1Doc) (*V1Plan, []featuredata.ColumnName, error) {
 			AllowShort:    doc.Execution.AllowShort,
 			SignalOnly:    doc.Execution.SignalOnly,
 			FillModelKind: "same_bar_close",
+			ReentryMode:   reentry,
 		},
 	}
 	entry, err := parseV1Entry(doc.Entry, addCol)
@@ -329,6 +347,20 @@ func parseV1Risk(in v1TypedBlock) (V1RiskPlan, error) {
 		out.FixedNotional = params.FixedNotional
 	}
 	return out, nil
+}
+
+func parseV1ReentryMode(raw string) (V1ReentryMode, error) {
+	v := strings.TrimSpace(raw)
+	switch v {
+	case "", string(V1ReentrySingle):
+		return V1ReentrySingle, nil
+	case string(V1ReentryContinuous):
+		return V1ReentryContinuous, nil
+	case string(V1ReentryFlip):
+		return V1ReentryFlip, nil
+	default:
+		return "", fmt.Errorf("unsupported execution.reentry_mode %q (expected single|continuous|flip)", raw)
+	}
 }
 
 func parseV1Predicate(token string) (V1Predicate, error) {

@@ -61,8 +61,10 @@ func RunV1(ctx context.Context, meta RunMetadata, plan *dslcompile.CompiledPlan,
 		}
 
 		exitedThisBar := false
+		flipRequested := false
 		if state.Position.Open {
-			if shouldExitBar(plan.V1, plan.AllowShort, &state.Position, bindings, i, bar) {
+			reason, ok := exitReason(plan.V1, plan.AllowShort, &state.Position, bindings, i, bar)
+			if ok {
 				trade, ret, err := closePosition(meta, &state, bar, plan.V1.Execution)
 				if err != nil {
 					return nil, fmt.Errorf("%w: %v", ErrExecutionFailed, err)
@@ -71,13 +73,26 @@ func RunV1(ctx context.Context, meta RunMetadata, plan *dslcompile.CompiledPlan,
 				trades = append(trades, trade)
 				returns = append(returns, ret)
 				exitedThisBar = true
-				// PR-07: close wins — do not allow a new entry on the same bar, and
-				// suppress entry on the immediately following bar (prevents
-				// "exit bar i then re-enter bar i+1" when signals stay true).
-				state.BlockedEntryUntilBar = bar.Index + 2
+				// PR-07/09: default close → suppress both same-bar reopen and
+				// next-bar re-entry (2-bar cooldown). `continuous`/`flip` allow
+				// next-bar re-entry; `flip` additionally permits same-bar open
+				// of the opposite side below.
+				state.BlockedEntryUntilBar = nextEntryBarAfterExit(plan.V1, bar.Index)
+				if reason == exitReasonFlip {
+					flipRequested = true
+				}
 			}
 		}
-		if !exitedThisBar && !state.Position.Open && i >= state.BlockedEntryUntilBar {
+		if flipRequested {
+			if sideOK, side := flipTargetSide(plan.V1, plan.AllowShort, bindings, i); sideOK {
+				if err := openPosition(meta, &state, bar, plan.V1, side, inferRegimeCode(bindings, i)); err != nil {
+					return nil, fmt.Errorf("%w: %v", ErrExecutionFailed, err)
+				}
+				// Same-bar reversal: the new position is now active and no
+				// cooldown applies to it.
+				state.BlockedEntryUntilBar = -1
+			}
+		} else if !exitedThisBar && !state.Position.Open && i >= state.BlockedEntryUntilBar {
 			if side, ok := pickV1EntrySide(plan.V1, plan.AllowShort, bindings, i); ok {
 				if err := openPosition(meta, &state, bar, plan.V1, side, inferRegimeCode(bindings, i)); err != nil {
 					return nil, fmt.Errorf("%w: %v", ErrExecutionFailed, err)
@@ -161,21 +176,112 @@ func pickV1EntrySide(plan *dslcompile.V1Plan, allowShort bool, b *v1Bindings, id
 	}
 }
 
-func shouldExitBar(plan *dslcompile.V1Plan, allowShort bool, pos *PositionState, b *v1Bindings, idx int, bar BarView) bool {
+// exitReasonCode enumerates the PR-07/08/09 exit triggers. The runtime uses
+// it to decide whether a same-bar reverse open is permitted (flip only).
+type exitReasonCode int
+
+const (
+	exitReasonNone exitReasonCode = iota
+	exitReasonCloseSide
+	exitReasonMechanical
+	exitReasonSignalHold
+	exitReasonFlip
+)
+
+// exitReason computes the ordered precedence from PR-09 §2:
+//  1. close_* (PR-07) — wins over all.
+//  2. mechanical exit (tp_sl/trailing_stop/time_based) — only if !signal_only.
+//  3. flip-close — only if reentry_mode=flip and opposite-side entry fires.
+//  4. signal-hold exit — only if signal_only (PR-08).
+//
+// Returns (reason, true) when the position should be closed at this bar.
+func exitReason(plan *dslcompile.V1Plan, allowShort bool, pos *PositionState, b *v1Bindings, idx int, bar BarView) (exitReasonCode, bool) {
 	if plan == nil || pos == nil || !pos.Open {
-		return false
+		return exitReasonNone, false
 	}
-	// PR-07/PR-08: independent close_* wins over mechanical exits and over signal-hold.
 	if shouldExitCloseSide(plan, pos, b, idx) {
-		return true
+		return exitReasonCloseSide, true
 	}
 	if !plan.Execution.SignalOnly {
 		if shouldExitMechanical(plan, pos, bar) {
-			return true
+			return exitReasonMechanical, true
 		}
+		if plan.Execution.ReentryMode == dslcompile.V1ReentryFlip && flipOppositeSignalFires(plan, allowShort, pos, b, idx) {
+			return exitReasonFlip, true
+		}
+		return exitReasonNone, false
+	}
+	if plan.Execution.ReentryMode == dslcompile.V1ReentryFlip && flipOppositeSignalFires(plan, allowShort, pos, b, idx) {
+		return exitReasonFlip, true
+	}
+	if shouldExitSignalHold(plan, allowShort, pos, b, idx) {
+		return exitReasonSignalHold, true
+	}
+	return exitReasonNone, false
+}
+
+// flipOppositeSignalFires returns true when an entry signal for the side
+// OPPOSITE to the current position is active at idx (and that side is allowed).
+// Only called under reentry_mode=flip.
+func flipOppositeSignalFires(plan *dslcompile.V1Plan, allowShort bool, pos *PositionState, b *v1Bindings, idx int) bool {
+	if plan == nil || pos == nil || !pos.Open {
 		return false
 	}
-	return shouldExitSignalHold(plan, allowShort, pos, b, idx)
+	switch pos.Side {
+	case execution.SideLong:
+		if !allowShort {
+			return false
+		}
+		// Symmetric-short shape cannot reliably report "short signal" without
+		// also implying long; flip requires explicit entry_short to avoid
+		// ambiguity.
+		if plan.SymmetricShortEntry {
+			return false
+		}
+		return evaluateV1IndicatorEntry(plan, plan.EntryShort, b, idx)
+	case execution.SideShort:
+		return evaluateV1IndicatorEntry(plan, plan.Entry, b, idx)
+	default:
+		return false
+	}
+}
+
+// flipTargetSide derives the reverse-side to open when a flip-close fires at
+// bar idx. The opposite-side signal must still be valid at idx; if both sides
+// also fire, long wins (same tie-break as flat entry).
+func flipTargetSide(plan *dslcompile.V1Plan, allowShort bool, b *v1Bindings, idx int) (bool, execution.Side) {
+	if plan == nil {
+		return false, execution.SideLong
+	}
+	longOK := evaluateV1IndicatorEntry(plan, plan.Entry, b, idx)
+	shortOK := false
+	if allowShort && !plan.SymmetricShortEntry {
+		shortOK = evaluateV1IndicatorEntry(plan, plan.EntryShort, b, idx)
+	}
+	switch {
+	case longOK:
+		return true, execution.SideLong
+	case shortOK:
+		return true, execution.SideShort
+	default:
+		return false, execution.SideLong
+	}
+}
+
+func oppositeSide(s execution.Side) execution.Side {
+	if s == execution.SideLong {
+		return execution.SideShort
+	}
+	return execution.SideLong
+}
+
+// nextEntryBarAfterExit encodes PR-09 cooldown: `single` → bar+2; otherwise
+// (continuous/flip) → bar+1.
+func nextEntryBarAfterExit(plan *dslcompile.V1Plan, barIndex int) int {
+	if plan != nil && (plan.Execution.ReentryMode == dslcompile.V1ReentryContinuous || plan.Execution.ReentryMode == dslcompile.V1ReentryFlip) {
+		return barIndex + 1
+	}
+	return barIndex + 2
 }
 
 func openPosition(meta RunMetadata, state *RuntimeState, bar BarView, plan *dslcompile.V1Plan, side execution.Side, regimeCode string) error {

@@ -349,6 +349,161 @@ func TestRunV1_DualEntryTieBreakPrefersLong(t *testing.T) {
 	}
 }
 
+// PR-09 continuous: no 2-bar cooldown — after close on bar i, re-entry on
+// bar i+1 is allowed if entry signal persists.
+func TestRunV1_ReentryContinuous_AllowsNextBarReentry(t *testing.T) {
+	// entry=ema_20_gt_ema_50 always true; close_long=rsi_14_lt_30000 fires only
+	// at bar2; after close we want re-entry at bar3 (which continuous allows).
+	dsl := `{
+  "schema_version": "1.2.0",
+  "strategy_code": "continuous_reentry",
+  "instrument_scope": { "exchange": "binance", "symbols": ["BTCUSDT"] },
+  "entry":   { "type": "indicator_condition", "params": { "left": "ema_20_gt_ema_50", "right": "" } },
+  "close_long": { "type": "indicator_condition", "params": { "left": "rsi_14_lt_30000", "right": "" } },
+  "exit":    { "type": "tp_sl", "params": { "take_profit_bps": 100000, "stop_loss_bps": 100000 } },
+  "filters": [],
+  "risk":    { "type": "fixed_fraction", "params": { "risk_bps": 100 } },
+  "execution": { "fee_bps": 0, "slippage_bps": 0, "allow_short": false, "reentry_mode": "continuous" }
+}`
+	plan := mustCompileV1(t, dsl)
+	frame := &featuredata.FeatureFrame{
+		FeatureSet: featuredata.FeatureSetKey{Code: "btcusdt_futures_mvp", Version: 1},
+		Symbol:     "BTCUSDT",
+		PriceScale: 0,
+		RowCount:   6,
+		Timestamps: []int64{
+			tsAt(0).UnixMilli(), tsAt(1).UnixMilli(), tsAt(2).UnixMilli(),
+			tsAt(3).UnixMilli(), tsAt(4).UnixMilli(), tsAt(5).UnixMilli(),
+		},
+		Int64s: map[featuredata.ColumnName]*featuredata.Int64Column{
+			featuredata.ColCloseTradeI64: {Name: featuredata.ColCloseTradeI64, Values: []int64{100, 101, 100, 102, 103, 104}},
+		},
+		Floats: map[featuredata.ColumnName]*featuredata.Float64Column{
+			featuredata.ColEMA20: {Name: featuredata.ColEMA20, Values: []float64{102, 103, 103, 103, 104, 105}, Valid: []uint64{0b111111}},
+			featuredata.ColEMA50: {Name: featuredata.ColEMA50, Values: []float64{100, 100, 100, 100, 100, 100}, Valid: []uint64{0b111111}},
+			// rsi drops below 30000 only at bar2 → close_long fires, then rsi recovers.
+			featuredata.ColRSI14: {Name: featuredata.ColRSI14, Values: []float64{35000, 33000, 28000, 32000, 34000, 36000}, Valid: []uint64{0b111111}},
+		},
+		Bools: map[featuredata.ColumnName]*featuredata.BoolColumn{},
+	}
+	res, err := RunV1(context.Background(), RunMetadata{
+		RunID: "run-cont", StrategyVersionID: "sv-cont", Symbol: "BTCUSDT",
+	}, plan, frame)
+	if err != nil {
+		t.Fatalf("RunV1: %v", err)
+	}
+	if len(res.Trades) != 2 {
+		t.Fatalf("continuous: trades=%d, want 2; %+v", len(res.Trades), res.Trades)
+	}
+	if !res.Trades[0].ExitTime.Equal(tsAt(2)) {
+		t.Fatalf("first trade must close at bar2 via close_long; got %+v", res.Trades[0])
+	}
+	if !res.Trades[1].EntryTime.Equal(tsAt(3)) {
+		t.Fatalf("second trade must re-enter at bar3 (continuous, no 2-bar cooldown); got %+v", res.Trades[1])
+	}
+}
+
+// PR-09 single (default): 2-bar cooldown preserved as a regression lock.
+func TestRunV1_ReentrySingle_Default_KeepsTwoBarCooldown(t *testing.T) {
+	dsl := `{
+  "schema_version": "1.2.0",
+  "strategy_code": "single_reentry",
+  "instrument_scope": { "exchange": "binance", "symbols": ["BTCUSDT"] },
+  "entry":   { "type": "indicator_condition", "params": { "left": "ema_20_gt_ema_50", "right": "" } },
+  "close_long": { "type": "indicator_condition", "params": { "left": "rsi_14_lt_30000", "right": "" } },
+  "exit":    { "type": "tp_sl", "params": { "take_profit_bps": 100000, "stop_loss_bps": 100000 } },
+  "filters": [],
+  "risk":    { "type": "fixed_fraction", "params": { "risk_bps": 100 } },
+  "execution": { "fee_bps": 0, "slippage_bps": 0, "allow_short": false }
+}`
+	plan := mustCompileV1(t, dsl)
+	frame := &featuredata.FeatureFrame{
+		FeatureSet: featuredata.FeatureSetKey{Code: "btcusdt_futures_mvp", Version: 1},
+		Symbol:     "BTCUSDT",
+		PriceScale: 0,
+		RowCount:   6,
+		Timestamps: []int64{
+			tsAt(0).UnixMilli(), tsAt(1).UnixMilli(), tsAt(2).UnixMilli(),
+			tsAt(3).UnixMilli(), tsAt(4).UnixMilli(), tsAt(5).UnixMilli(),
+		},
+		Int64s: map[featuredata.ColumnName]*featuredata.Int64Column{
+			featuredata.ColCloseTradeI64: {Name: featuredata.ColCloseTradeI64, Values: []int64{100, 101, 100, 102, 103, 104}},
+		},
+		Floats: map[featuredata.ColumnName]*featuredata.Float64Column{
+			featuredata.ColEMA20: {Name: featuredata.ColEMA20, Values: []float64{102, 103, 103, 103, 104, 105}, Valid: []uint64{0b111111}},
+			featuredata.ColEMA50: {Name: featuredata.ColEMA50, Values: []float64{100, 100, 100, 100, 100, 100}, Valid: []uint64{0b111111}},
+			featuredata.ColRSI14: {Name: featuredata.ColRSI14, Values: []float64{35000, 33000, 28000, 32000, 34000, 36000}, Valid: []uint64{0b111111}},
+		},
+		Bools: map[featuredata.ColumnName]*featuredata.BoolColumn{},
+	}
+	res, err := RunV1(context.Background(), RunMetadata{
+		RunID: "run-single", StrategyVersionID: "sv-single", Symbol: "BTCUSDT",
+	}, plan, frame)
+	if err != nil {
+		t.Fatalf("RunV1: %v", err)
+	}
+	if len(res.Trades) != 2 {
+		t.Fatalf("single: trades=%d, want 2 (close at bar2 + eol close); %+v", len(res.Trades), res.Trades)
+	}
+	// With 2-bar cooldown, re-entry at bar3 is blocked; re-entry can only happen at bar4;
+	// so the second trade must start at bar4 (not bar3).
+	if !res.Trades[1].EntryTime.Equal(tsAt(4)) {
+		t.Fatalf("single mode: re-entry must wait until bar4 (cooldown = bar+2); got %+v", res.Trades[1])
+	}
+}
+
+// PR-09 flip: opposite-side entry signal on same bar closes current and opens reverse.
+func TestRunV1_ReentryFlip_SameBarReversal(t *testing.T) {
+	// Long entry: ema_20 > ema_50. Short entry: ema_20 < ema_50.
+	// At bar1: long entry fires. At bar2: ema_20 < ema_50 → short signal fires → flip.
+	dsl := `{
+  "schema_version": "1.2.0",
+  "strategy_code": "flip_reversal",
+  "instrument_scope": { "exchange": "binance", "symbols": ["BTCUSDT"] },
+  "entry":       { "type": "indicator_condition", "params": { "left": "ema_20_gt_ema_50", "right": "" } },
+  "entry_short": { "type": "indicator_condition", "params": { "left": "ema_20_lt_ema_50", "right": "" } },
+  "exit":    { "type": "tp_sl", "params": { "take_profit_bps": 100000, "stop_loss_bps": 100000 } },
+  "filters": [],
+  "risk":    { "type": "fixed_fraction", "params": { "risk_bps": 100 } },
+  "execution": { "fee_bps": 0, "slippage_bps": 0, "allow_short": true, "reentry_mode": "flip" }
+}`
+	plan := mustCompileV1(t, dsl)
+	frame := &featuredata.FeatureFrame{
+		FeatureSet: featuredata.FeatureSetKey{Code: "btcusdt_futures_mvp", Version: 1},
+		Symbol:     "BTCUSDT",
+		PriceScale: 0,
+		RowCount:   4,
+		Timestamps: []int64{
+			tsAt(0).UnixMilli(), tsAt(1).UnixMilli(), tsAt(2).UnixMilli(), tsAt(3).UnixMilli(),
+		},
+		Int64s: map[featuredata.ColumnName]*featuredata.Int64Column{
+			featuredata.ColCloseTradeI64: {Name: featuredata.ColCloseTradeI64, Values: []int64{100, 105, 95, 90}},
+		},
+		Floats: map[featuredata.ColumnName]*featuredata.Float64Column{
+			// bar0: equal → neither long nor short fires (strict gt/lt).
+			// bar1: long fires. bar2: short fires → flip. bar3: short holds.
+			featuredata.ColEMA20: {Name: featuredata.ColEMA20, Values: []float64{100, 105, 95, 90}, Valid: []uint64{0b1111}},
+			featuredata.ColEMA50: {Name: featuredata.ColEMA50, Values: []float64{100, 100, 100, 100}, Valid: []uint64{0b1111}},
+		},
+		Bools: map[featuredata.ColumnName]*featuredata.BoolColumn{},
+	}
+	res, err := RunV1(context.Background(), RunMetadata{
+		RunID: "run-flip", StrategyVersionID: "sv-flip", Symbol: "BTCUSDT",
+	}, plan, frame)
+	if err != nil {
+		t.Fatalf("RunV1: %v", err)
+	}
+	if len(res.Trades) != 2 {
+		t.Fatalf("flip: trades=%d want 2 (long+short reversal, eol close); %+v", len(res.Trades), res.Trades)
+	}
+	if res.Trades[0].Side != "LONG" || !res.Trades[0].ExitTime.Equal(tsAt(2)) {
+		t.Fatalf("flip: first trade must be LONG closed at bar2; got %+v", res.Trades[0])
+	}
+	if res.Trades[1].Side != "SHORT" || !res.Trades[1].EntryTime.Equal(tsAt(2)) {
+		t.Fatalf("flip: second trade must be SHORT opened at bar2 (same-bar reversal); got %+v", res.Trades[1])
+	}
+}
+
 func mustCompileV1(t *testing.T, raw string) *dslcompile.CompiledPlan {
 	t.Helper()
 	p, err := dslcompile.Compile([]byte(raw))

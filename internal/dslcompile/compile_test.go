@@ -199,6 +199,65 @@ func TestCompile_V1_SignalOnlyExecutionFlag(t *testing.T) {
 	}
 }
 
+func TestCompile_V1_ReentryMode(t *testing.T) {
+	cases := map[string]struct {
+		raw      string
+		want     V1ReentryMode
+		wantFail bool
+	}{
+		"default empty": {
+			raw:  `"fee_bps": 0, "slippage_bps": 0, "allow_short": true`,
+			want: V1ReentrySingle,
+		},
+		"single explicit": {
+			raw:  `"fee_bps": 0, "slippage_bps": 0, "allow_short": true, "reentry_mode": "single"`,
+			want: V1ReentrySingle,
+		},
+		"continuous": {
+			raw:  `"fee_bps": 0, "slippage_bps": 0, "allow_short": true, "reentry_mode": "continuous"`,
+			want: V1ReentryContinuous,
+		},
+		"flip": {
+			raw:  `"fee_bps": 0, "slippage_bps": 0, "allow_short": true, "reentry_mode": "flip"`,
+			want: V1ReentryFlip,
+		},
+		"invalid": {
+			raw:      `"fee_bps": 0, "slippage_bps": 0, "allow_short": true, "reentry_mode": "chaotic"`,
+			wantFail: true,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			body := []byte(`{
+  "schema_version": "1.2.0",
+  "strategy_code": "reentry_mode_compile",
+  "instrument_scope": { "exchange": "binance", "symbols": ["BTCUSDT"] },
+  "entry": { "type": "indicator_condition", "params": { "left": "ema_20_gt_ema_50", "right": "" } },
+  "exit": { "type": "tp_sl", "params": { "take_profit_bps": 200, "stop_loss_bps": 100 } },
+  "filters": [],
+  "risk": { "type": "fixed_fraction", "params": { "risk_bps": 100 } },
+  "execution": { ` + tc.raw + ` }
+}`)
+			plan, err := Compile(body)
+			if tc.wantFail {
+				if err == nil {
+					t.Fatal("expected compile failure for invalid reentry_mode")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			if plan.V1 == nil {
+				t.Fatal("V1 plan nil")
+			}
+			if plan.V1.Execution.ReentryMode != tc.want {
+				t.Fatalf("ReentryMode=%q want %q", plan.V1.Execution.ReentryMode, tc.want)
+			}
+		})
+	}
+}
+
 func TestCompile_V2_HappyPath_ExtractsDedupedOrderedColumns(t *testing.T) {
 	// Include a duplicate resolved column (ema_20 twice) to prove dedupe keeps
 	// first-seen ordering. mark_close_i64 / funding_rate_current round out
