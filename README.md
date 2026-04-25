@@ -37,6 +37,14 @@ From this directory:
 go run ./cmd/worker
 ```
 
+**Stage 6.1 E2E (v1 DSL + feature parquet):** set `BT_FEATURE_READ_FRAME=true` and `BT_MINIO_*` (see `internal/storage/storage.go`), then seed MinIO + control-plane `datasets` / `dataset_partitions`:
+
+```bash
+go run ./cmd/seed-stage61-data -cp http://localhost:8080 -minio-endpoint localhost:9000 -minio-access minioadmin -minio-secret minioadmin -bucket algorhythm-datasets
+```
+
+Details: `docs/stages/stage-6-1-canonical-e2e.md` in the meta-repo.
+
 Or build:
 
 ```bash
